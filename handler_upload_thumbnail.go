@@ -40,6 +40,8 @@ func (cfg *apiConfig) handlerUploadThumbnail(w http.ResponseWriter, r *http.Requ
 		return
 	}
 
+	defer file.Close()
+
 	fileMediaType := fHeader.Header.Get("Content-Type")
 
 	data, err := io.ReadAll(file)
