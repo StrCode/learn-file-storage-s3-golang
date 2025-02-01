@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -11,10 +12,13 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
+	"time"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/service/s3"
 	"github.com/bootdotdev/learn-file-storage-s3-golang-starter/internal/auth"
+	"github.com/bootdotdev/learn-file-storage-s3-golang-starter/internal/database"
 	"github.com/google/uuid"
 )
 
@@ -130,9 +134,18 @@ func (cfg *apiConfig) handlerUploadVideo(w http.ResponseWriter, r *http.Request)
 		return
 	}
 
-	url := cfg.getObjectURL(key)
+	// url := cfg.getObjectURL(key)
+	url := fmt.Sprintf("%s,%s", cfg.s3Bucket, key)
 	video.VideoURL = &url
-	err = cfg.db.UpdateVideo(video)
+
+	signedVideo, err := cfg.dbVideoToSignedVideo(video)
+	if err != nil {
+		respondWithError(w, http.StatusInternalServerError, "Couldn't update video", err)
+		return
+	}
+
+	signedVideo.VideoURL = &url
+	err = cfg.db.UpdateVideo(signedVideo)
 	if err != nil {
 		respondWithError(w, http.StatusInternalServerError, "Couldn't update video", err)
 		return
@@ -196,4 +209,46 @@ func processVideoForFastStart(filePath string) (string, error) {
 	}
 
 	return outputPath, nil
+}
+
+func generatePresignedURL(s3Client *s3.Client, bucket, key string, expireTime time.Duration) (string, error) {
+	objectInput := s3.GetObjectInput{
+		Bucket: &bucket,
+		Key:    &key,
+	}
+
+	client := s3.NewPresignClient(s3Client)
+
+	v4req, err := client.PresignGetObject(
+		context.Background(),
+		&objectInput,
+		s3.WithPresignExpires(expireTime),
+	)
+	if err != nil {
+		return "", fmt.Errorf("could not generate presigned url:%v", err)
+	}
+
+	return v4req.URL, nil
+}
+
+func (cfg *apiConfig) dbVideoToSignedVideo(video database.Video) (database.Video, error) {
+	videoURL := *video.VideoURL
+
+	videoKeys := strings.Split(videoURL, ",")
+	bucket := videoKeys[0]
+	key := videoKeys[1]
+
+	presignedURL, err := generatePresignedURL(
+		cfg.s3Client,
+		bucket,
+		key,
+		1*time.Hour,
+	)
+	if err != nil {
+		return database.Video{}, fmt.Errorf("could not get video: %v", err)
+	}
+
+	video.VideoURL = &presignedURL
+
+	return video, nil
 }
