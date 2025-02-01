@@ -37,7 +37,6 @@ func (cfg *apiConfig) handlerUploadVideo(w http.ResponseWriter, r *http.Request)
 
 	userID, err := auth.ValidateJWT(token, cfg.jwtSecret)
 	if err != nil {
-		respondWithError(w, http.StatusUnauthorized, "Couldn't validate JWT", err)
 		return
 	}
 
@@ -73,6 +72,7 @@ func (cfg *apiConfig) handlerUploadVideo(w http.ResponseWriter, r *http.Request)
 		respondWithError(w, http.StatusInternalServerError, "Could not create temp file", err)
 		return
 	}
+
 	defer os.Remove(tempFile.Name())
 	defer tempFile.Close()
 
@@ -86,6 +86,20 @@ func (cfg *apiConfig) handlerUploadVideo(w http.ResponseWriter, r *http.Request)
 		respondWithError(w, http.StatusInternalServerError, "Could not reset file pointer", err)
 		return
 	}
+
+	processedFilePath, err := processVideoForFastStart(tempFile.Name())
+	if err != nil {
+		respondWithError(w, http.StatusInternalServerError, "Error processing video", err)
+		return
+	}
+	defer os.Remove(processedFilePath)
+
+	processedFile, err := os.Open(processedFilePath)
+	if err != nil {
+		respondWithError(w, http.StatusInternalServerError, "Could not open processed file", err)
+		return
+	}
+	defer processedFile.Close()
 
 	directory := ""
 	aspectRatio, err := getVideoAspectRatio(tempFile.Name())
@@ -104,10 +118,11 @@ func (cfg *apiConfig) handlerUploadVideo(w http.ResponseWriter, r *http.Request)
 
 	key := getAssetPath(mediaType)
 	key = filepath.Join(directory, key)
+
 	_, err = cfg.s3Client.PutObject(r.Context(), &s3.PutObjectInput{
 		Bucket:      aws.String(cfg.s3Bucket),
 		Key:         aws.String(key),
-		Body:        tempFile,
+		Body:        processedFile,
 		ContentType: aws.String(mediaType),
 	})
 	if err != nil {
@@ -164,4 +179,21 @@ func getVideoAspectRatio(filePath string) (string, error) {
 		return "9:16", nil
 	}
 	return "other", nil
+}
+
+func processVideoForFastStart(filePath string) (string, error) {
+	outputPath := filePath + ".processing"
+
+	cmd := exec.Command(
+		"ffmpeg",
+		"-i", filePath, "-c", "copy",
+		"-movflags", "faststart", "-f", "mp4", outputPath,
+	)
+
+	err := cmd.Run()
+	if err != nil {
+		return "", fmt.Errorf("could not process video for fast start: %v", err)
+	}
+
+	return outputPath, nil
 }
